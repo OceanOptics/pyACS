@@ -33,8 +33,8 @@ optional arguments:
 
 ## Embed in other Software
 The class `ACS` provides key methods to handle the binary ACS data
-    - `read_device_file`: Parse device file to be able to unpack and calibrate binary frame
-    - `unpack_frame`: Unpack/Decode binary frame into named tuple `FrameContainer`
-    - `calibrate_frame`: Convert engineering units (counts) into scientific units (1/m for a and c)
+* `read_device_file`: Parse device file to be able to unpack and calibrate binary frame
+* `unpack_frame`: Unpack/Decode binary frame into named tuple `FrameContainer`
+* `calibrate_frame`: Convert engineering units (counts) into scientific units (1/m for a and c)
 
 The class `BinReader` helps to separate individual frames looking the registration bytes `b'\xff\x00\xff\x00'`. An example of usage of that class is `ConvertBinToCSV` which converts a binary file recorded with Compass into a CSV file. 
