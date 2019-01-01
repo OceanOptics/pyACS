@@ -7,10 +7,11 @@ from struct import unpack, unpack_from, calcsize
 import csv
 from sys import version_info, exit
 
-
 # Check Python version running script
 if version_info.major != 3:
-    print("Script incompatible with Python {:d}.{:d}.{:d}".format(version_info.major, version_info.minor, version_info.micro))
+    print("Script incompatible with Python {:d}.{:d}.{:d}".format(version_info.major,
+                                                                  version_info.minor,
+                                                                  version_info.micro))
     print("Please use Python 3.")
     exit(-1)
 
@@ -44,23 +45,7 @@ class SerialNumberIncorrectError(ACSError):
     pass
 
 
-# # "for byte in data" fails for python3 as it returns ints instead of bytes
-# def iterbytes(b):
-#     """Iterate over bytes, returning bytes instead of ints (python3)"""
-#     if isinstance(b, memoryview):
-#         b = b.tobytes()
-#     i = 0
-#     while True:
-#         a = b[i:i + 1]
-#         i += 1
-#         if a:
-#             yield a
-#         else:
-#             break
-
-
 class BinReader:
-
     REGISTRATION = b'\xff\x00\xff\x00'
     READ_SIZE = 1024
 
@@ -93,7 +78,7 @@ class BinReader:
 
 class CSVWriter:
 
-    def __init__(self, lambda_c = None, lambda_a=None, write_auxiliaries=False):
+    def __init__(self, lambda_c=None, lambda_a=None, write_auxiliaries=False):
         # Wavelength (in nm)
         self.lambda_c = lambda_c
         self.lambda_a = lambda_a
@@ -108,7 +93,7 @@ class CSVWriter:
         if self.write_auxiliaries:
             fieldnames.extend(['temperature_internal', 'temperature_external'])
         self.f = open(filename, 'w')
-        self.writer = csv.writer(self.f)  #, fieldnames=fieldnames)
+        self.writer = csv.writer(self.f)  # , fieldnames=fieldnames)
         # self.writer.writeheader()
         self.writer.writerow(fieldnames)
 
@@ -150,34 +135,6 @@ class ConvertBinToCSV(BinReader):
             self.csv.write(raw_frame, cal_frame)
         except FrameIncompleteError:
             self.counter_bad += 1
-
-
-# def get_frame(queue):
-#     # Read next complete frame in queue and remove it from the queue
-#
-#     # Look for first registration packet 0xff 0x00 0xff 0x00
-#     n = len(queue)
-#     i = 0
-#     while queue[i:i + 4] != b'\xff\x00\xff\x00':
-#         i += 1
-#         # End of queue before could find a frame header
-#         if i > n - 4:
-#             return None, None
-#     frame_start = i
-#
-#     # Look for next registration packet
-#     i = frame_start + 4
-#     while i < n - 4 and queue[i:i + 4] != b'\xff\x00\xff\x00':
-#         i += 1
-#     frame_end = i
-#
-#     frame = queue[frame_start:frame_end]
-#     if frame_end < n:
-#         queue = queue[frame_end + 1:]
-#     else:
-#         queue = None
-#
-#     return frame, queue
 
 
 def compute_external_temperature(counts):
@@ -259,10 +216,10 @@ class ACS:
                'WL(c): ' + str(self.lambda_c.size) + ' ' + str(self.lambda_c) + '\n' + \
                'WL(a): ' + str(self.lambda_a.size) + ' ' + str(self.lambda_a) + '\n' + \
                'T:' + str(self.t.size) + ' ' + str(self.t) + '\n' + \
-               'DT(c): ' + str(np.size(self.delta_t_c, 0)) + ' ' + str(np.size(self.delta_t_c, 1)) + ' ' + str(
-            self.delta_t_c) + '\n' + \
-               'DT(a): ' + str(np.size(self.delta_t_a, 0)) + ' ' + str(np.size(self.delta_t_a, 1)) + ' ' + str(
-            self.delta_t_a) + '\n' + \
+               'DT(c): ' + str(np.size(self.delta_t_c, 0)) + ' ' + str(np.size(self.delta_t_c, 1)) + ' '\
+                         + str(self.delta_t_c) + '\n' + \
+               'DT(a): ' + str(np.size(self.delta_t_a, 0)) + ' ' + str(np.size(self.delta_t_a, 1)) + ' '\
+                         + str(self.delta_t_a) + '\n' + \
                'WO(c): ' + str(self.offset_c.size) + ' ' + str(self.offset_c) + '\n' + \
                'WO(a): ' + str(self.offset_a.size) + ' ' + str(self.offset_a) + '\n' + \
                'FMT_F: ' + str(self.frame_core_format) + '\n'
@@ -380,9 +337,9 @@ class ACS:
         # Get frame header (skip registration packet)
         d = unpack_from(self.FRAME_HEADER_FORMAT, frame, offset=4)
         data = FrameContainer(frame_len=d[0],  # packet length
-                              frame_type=d[1],  # Packet type identifier
+                              frame_type=d[1],  # packet type identifier
                               # data[] = d[2] # reserved for future use (1)
-                              serial_number=hex(d[3]),  # Instrument Serial Number (Meter type (first 2 bytes))
+                              serial_number=hex(d[3]),  # instrument Serial Number (Meter type (first 2 bytes))
                               a_ref_dark=d[4],  # A reference dark counts (for diagnostic purpose)
                               p=d[5],  # A/D counts from the pressure sensor circuitry
                               a_sig_dark=d[6],  # A signal dark counts (for diagnostic purpose)
@@ -392,9 +349,9 @@ class ACS:
                               c_sig_dark=d[10],  # C signal dark counts
                               time_stamp=d[11],  # unsigned integer: Time stamp (ms)
                               # data[] = d[12] # reserved for future use
-                              output_wavelength=d[13],
+                              output_wavelength=d[13], # number of output wavelength
                               c_ref=np.empty(d[13], dtype=np.uint16), a_ref=np.empty(d[13], dtype=np.uint16),
-                              c_sig=np.empty(d[13], dtype=np.uint16), a_sig=np.empty(d[13], dtype=np.uint16))  # unsigned integer: Number of output wavelength
+                              c_sig=np.empty(d[13], dtype=np.uint16),a_sig=np.empty(d[13], dtype=np.uint16))
 
         if force:
             if data.output_wavelength != self.output_wavelength:
@@ -416,7 +373,8 @@ class ACS:
                 raise FrameChecksumError('Checksum failed.')
 
         # Get frame core (counts)s
-        d = unpack_from(self.frame_core_format, frame, offset=self.FRAME_HEADER_LEN + 4)  # 4 + 28: registration + header size
+        d = unpack_from(self.frame_core_format, frame,
+                        offset=self.FRAME_HEADER_LEN + 4)  # 4 + 28: registration + header size
         data.c_ref[:] = np.array(d[0::4], dtype=np.uint16)
         data.a_ref[:] = np.array(d[1::4], dtype=np.uint16)
         data.c_sig[:] = np.array(d[2::4], dtype=np.uint16)
@@ -447,7 +405,6 @@ class ACS:
             return c, a, internal_temperature_su, external_temperature_su
         else:
             return c, a
-
 
 # if __name__ == '__main__':
 
