@@ -10,7 +10,7 @@ The package runs with python 3 only. Install it with PyPI using the command:
 
     pip install pyACS
 
-Or from the sources available on [GitHub repository](https://github.com/OceanColor/pyACS/).
+Or from the sources available on [GitHub repository](https://github.com/OceanOptics/pyACS/).
 The distribution archive can be generated using:
 
     python3 setup.py sdist bdist_wheel

@@ -12,7 +12,7 @@ setuptools.setup(
     description="Unpack and calibrate binary data from a WetLabs ACS",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/OceanColor/pyACS/",
+    url="https://github.com/OceanOptics/pyACS/",
     packages=setuptools.find_packages(),
     install_requires=['numpy'],
     license='MIT',
