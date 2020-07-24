@@ -1,6 +1,7 @@
 import unittest
 from struct import unpack
 import numpy as np
+from scipy import interpolate
 
 TEST_FRAME = b'\x53\xd0\x03\x01\x53\x00\x00\x02\x4e\x1e\x01\xba\x21\x29\x35\xff\
 \x00\xff\x00\x02\xd0\x05\x01\x53\x00\x00\x02\x4e\x1a\x01\xba\x02\
@@ -129,29 +130,29 @@ class TestACSFunctions(unittest.TestCase):
 
     def test_acs_calibrate_frame(self):
         # Same as method test_acs_calibrate_math but use acs.calibrate_frame with 3 wavelength
-        from pyACS.acs import ACS, FrameContainer
+        from pyACS import acs as pa
         # Define Frame
         counts = unpack('!HHHH', b'\x04\x05\x03\x63\x04\xf4\x03\x10')
-        frame = FrameContainer(serial_number='0x5300012A',  # acs 298
-                               output_wavelength=3,
-                               # t_int=unpack('!H', b'\xb9\xd7')[0],  # 17.91 Issue with temperature in wetview doc
-                               t_int=42969, # 42969=27.931 ou 42970=27.929
-                               c_ref=counts[0],
-                               a_ref=np.array([counts[1],counts[1],counts[1]], dtype=np.uint16),
-                               c_sig=counts[2],
-                               a_sig=np.array([counts[3],counts[3],counts[3]], dtype=np.uint16),
-                               frame_len=np.NaN,  # packet length
-                               frame_type=np.NaN,  # Packet type identifier
-                               a_ref_dark=np.NaN,  # A reference dark counts (for diagnostic purpose)
-                               p=np.NaN,  # A/D counts from the pressure sensor circuitry
-                               a_sig_dark=np.NaN,  # A signal dark counts (for diagnostic purpose)
-                               t_ext=np.NaN,  # External temperature voltage counts
-                               c_ref_dark=np.NaN,  # C reference dark counts
-                               c_sig_dark=np.NaN,  # C signal dark counts
-                               time_stamp=np.NaN  # unsigned integer: Time stamp (ms)
-                               )
+        frame = pa.FrameContainer(serial_number='0x5300012A',  # acs 298
+                                   output_wavelength=3,
+                                   # t_int=unpack('!H', b'\xb9\xd7')[0],  # 17.91 Issue with temperature in wetview doc
+                                   t_int=42969, # 42969=27.931 ou 42970=27.929
+                                   c_ref=counts[0],
+                                   a_ref=np.array([counts[1],counts[1],counts[1]], dtype=np.uint16),
+                                   c_sig=counts[2],
+                                   a_sig=np.array([counts[3],counts[3],counts[3]], dtype=np.uint16),
+                                   frame_len=np.NaN,  # packet length
+                                   frame_type=np.NaN,  # Packet type identifier
+                                   a_ref_dark=np.NaN,  # A reference dark counts (for diagnostic purpose)
+                                   p=np.NaN,  # A/D counts from the pressure sensor circuitry
+                                   a_sig_dark=np.NaN,  # A signal dark counts (for diagnostic purpose)
+                                   t_ext=np.NaN,  # External temperature voltage counts
+                                   c_ref_dark=np.NaN,  # C reference dark counts
+                                   c_sig_dark=np.NaN,  # C signal dark counts
+                                   time_stamp=np.NaN  # unsigned integer: Time stamp (ms)
+                                   )
         # Define ACS
-        acs = ACS()
+        acs = pa.ACS()
         acs.serial_number = '0x5300012A'
         acs.output_wavelength = 3
         acs.t = np.array([27.75, 28.2625])
@@ -164,7 +165,22 @@ class TestACSFunctions(unittest.TestCase):
         acs.offset_a = np.array([-0.431,-0.431,-0.431])
         acs.x = 0.25
 
-        _, a = acs.calibrate_frame(frame)
+        # Finish init for SciPy runs
+        acs.f_delta_t_c = interpolate.interp1d(acs.t, acs.delta_t_c, axis=1)
+        acs.f_delta_t_a = interpolate.interp1d(acs.t, acs.delta_t_a, axis=1)
+
+        # Test with SciPy
+        pa.__dict__['SCIPY_IMPORTED'] = True
+        _, a, flag_outside_temperature_calibration_range = acs.calibrate_frame(frame)
+        self.assertEqual(flag_outside_temperature_calibration_range, False)
+        for i in range(3):
+            self.assertEqual(a[0], a[i])
+            self.assertAlmostEqual(float(a[i]), -0.0409, 2)
+
+        # Test with numPy
+        pa.__dict__['SCIPY_IMPORTED'] = False
+        _, a, flag_outside_temperature_calibration_range = acs.calibrate_frame(frame)
+        self.assertEqual(flag_outside_temperature_calibration_range, False)
         for i in range(3):
             self.assertEqual(a[0], a[i])
             self.assertAlmostEqual(float(a[i]), -0.0409, 2)

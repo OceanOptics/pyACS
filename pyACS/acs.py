@@ -6,6 +6,12 @@ from collections import namedtuple
 from struct import unpack, unpack_from, calcsize
 import csv
 from sys import version_info, exit
+try:
+    from scipy import interpolate
+except ImportError:
+    SCIPY_IMPORTED = False
+else:
+    SCIPY_IMPORTED = True
 
 # Check Python version running script
 if version_info.major != 3:
@@ -177,7 +183,7 @@ class ACS:
 
     def __init__(self, device_filename=None):
         # Meta data
-        self.serial_number = None
+        self.serial_number = None   # and Meter Type
         self.structure_version_number = None
         self.baudrate = 115200
         self.output_wavelength = None
@@ -201,6 +207,8 @@ class ACS:
         self.t = None
         self.delta_t_c = None
         self.delta_t_a = None
+        self.f_delta_t_c = None
+        self.f_delta_t_a = None
 
         # Unpack frame format
         self.frame_core_format = None
@@ -271,7 +279,13 @@ class ACS:
                     self.delta_t_a[iwl, :] = np.array(foo[2].split('\t'))
                     iwl += 1
                 # skip lines "ACS Meter", "tcal[...]", and "maxANoise	maxCNoise[...]"
-                # TODO: Add test
+            if SCIPY_IMPORTED:
+                # Build 2D interpolation function for speed
+                self.f_delta_t_c = interpolate.interp1d(self.t, self.delta_t_c, axis=1, assume_sorted=True, copy=False,
+                                     bounds_error=False, fill_value=(self.delta_t_c[:,1], self.delta_t_c[:,-1]))
+                self.f_delta_t_a = interpolate.interp1d(self.t, self.delta_t_a, axis=1, assume_sorted=True, copy=False,
+                                     bounds_error=False, fill_value=(self.delta_t_a[:,1], self.delta_t_a[:,-1]))
+            #TODO: Add test
 
     def set_output_wavelength(self, output_wavelength):
         # Change number of wavelength of object
@@ -396,15 +410,24 @@ class ACS:
 
         # Process
         internal_temperature_su = compute_internal_temperature(frame.t_int)
-        delta_t_c = [np.interp(internal_temperature_su, self.t, v) for v in self.delta_t_c]
-        delta_t_a = [np.interp(internal_temperature_su, self.t, v) for v in self.delta_t_a]
+        if internal_temperature_su < self.t[0] or self.t[-1] < internal_temperature_su:
+            flag_outside_T_cal_range = True
+        else:
+            flag_outside_T_cal_range = False
+        if SCIPY_IMPORTED:
+            delta_t_c = self.f_delta_t_c(internal_temperature_su)
+            delta_t_a = self.f_delta_t_a(internal_temperature_su)
+        else:
+            # Use numpy for interpolation (slower as do every wavelength one by one)
+            delta_t_c = [np.interp(internal_temperature_su, self.t, v) for v in self.delta_t_c]
+            delta_t_a = [np.interp(internal_temperature_su, self.t, v) for v in self.delta_t_a]
         c = (self.offset_c - (1 / self.x) * np.log(frame.c_sig / frame.c_ref)) - delta_t_c
         a = (self.offset_a - (1 / self.x) * np.log(frame.a_sig / frame.a_ref)) - delta_t_a
         if get_auxiliaries:
             external_temperature_su = compute_external_temperature(frame.t_ext)
-            return c, a, internal_temperature_su, external_temperature_su
+            return c, a, internal_temperature_su, external_temperature_su, flag_outside_T_cal_range
         else:
-            return c, a
+            return c, a, flag_outside_T_cal_range
 
 # if __name__ == '__main__':
 
