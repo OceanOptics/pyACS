@@ -32,7 +32,8 @@ class DEV2NC(ACS):
         Find the date the dev file was created so it can be added as a .nc attribute.
         """
         [loi] = [_line for _line in self._dev_lines if 'The offsets were saved' in _line] # Get line of interest.
-        self._dev_created_date = datetime.strptime(re.findall('(\d{2}/\d{2}/\d{4})',loi)[0], '%m/%d/%Y')
+        loi = loi.replace(' ','')
+        self._dev_created_date = datetime.strptime(re.findall('on(.*?)\.',loi)[0], '%m/%d/%Y')
 
 
     def _get_tcal_ical(self):
