@@ -292,10 +292,7 @@ class ACS:
                         self.delta_t_a = np.empty((self.output_wavelength, n))
                 elif l[0] == '\t':
                     # Temperatures
-                    try:  # Try with numpy float attribute (numpy version < 1.20)
-                        self.t = np.array(l.split(';')[0].strip().split('\t')).astype(np.float)
-                    except: # If AttributeError, then default to builtin float (numpy version >= 1.20)
-                        self.t = np.array(l.split(';')[0].strip().split('\t')).astype(float)
+                    self.t = np.array(l.split(';')[0].strip().split('\t')).astype(float)
                 elif l[0] == 'C':
                     foo = l.split('\t\t')
                     # Wavelength
