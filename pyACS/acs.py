@@ -424,7 +424,7 @@ class ACS:
                  False: checksum received and computed do not match
         """
         # Frame length could be check but is not as checksum should fail if frame length is incorrect
-        return np.uint16(sum(frame)) == unpack_from('!H', checksum_received)
+        return np.uint16(sum(frame) % 2 ** 16) == unpack_from('!H', checksum_received)
 
     def unpack_frame(self, frame):
         """
