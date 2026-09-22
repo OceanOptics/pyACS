@@ -384,7 +384,7 @@ class ACS:
         i = buffer.find(self.REGISTRATION_BYTES)
         if i == -1:
             # No registration byte found
-            return bytearray(), False, buffer, bytearray()
+            return bytearray(), None, buffer, bytearray()
         # Take care of special case when checksum + pad byte or just checksum = \xff\x00
         # It's unlikely that the full packet length is equal to \xff\x00 = 65280
         while buffer.find(self.REGISTRATION_BYTES, i + 2, i + 2 + self.REGISTRATION_BYTES_LENGTH) != -1:
@@ -392,7 +392,7 @@ class ACS:
         frame_end_index = i + self.frame_length
         # Make sure buffer is long enough (incl. 2-byte checksum)
         if len(buffer) < frame_end_index + 2:
-            return bytearray(), False, buffer, bytearray()
+            return bytearray(), None, buffer, bytearray()
         # Get frame and checksum
         frame = buffer[i:frame_end_index]
         checksum = buffer[frame_end_index:frame_end_index + 2]
