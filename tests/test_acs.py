@@ -137,15 +137,15 @@ class TestACSFunctions(unittest.TestCase):
                                      a_ref=np.array([counts[1],counts[1],counts[1]], dtype=np.uint16),
                                      c_sig=counts[2],
                                      a_sig=np.array([counts[3],counts[3],counts[3]], dtype=np.uint16),
-                                     frame_len=np.NaN,  # packet length
-                                     frame_type=np.NaN,  # Packet type identifier
-                                     a_ref_dark=np.NaN,  # A reference dark counts (for diagnostic purpose)
-                                     p=np.NaN,  # A/D counts from the pressure sensor circuitry
-                                     a_sig_dark=np.NaN,  # A signal dark counts (for diagnostic purpose)
-                                     t_ext=np.NaN,  # External temperature voltage counts
-                                     c_ref_dark=np.NaN,  # C reference dark counts
-                                     c_sig_dark=np.NaN,  # C signal dark counts
-                                     time_stamp=np.NaN)  # unsigned integer: Time stamp (ms)
+                                     frame_len=np.nan,  # packet length
+                                     frame_type=np.nan,  # Packet type identifier
+                                     a_ref_dark=np.nan,  # A reference dark counts (for diagnostic purpose)
+                                     p=np.nan,  # A/D counts from the pressure sensor circuitry
+                                     a_sig_dark=np.nan,  # A signal dark counts (for diagnostic purpose)
+                                     t_ext=np.nan,  # External temperature voltage counts
+                                     c_ref_dark=np.nan,  # C reference dark counts
+                                     c_sig_dark=np.nan,  # C signal dark counts
+                                     time_stamp=np.nan)  # unsigned integer: Time stamp (ms)
         # Define ACS
         acs = pa.ACS()
         acs.serial_number = '0x5300012A'
@@ -250,7 +250,6 @@ class TestACSFunctions(unittest.TestCase):
         passed = acs.check_data(data)
         self.assertEqual(passed, True)
 
-    @unittest.skip("skipping Compass Dataset test")
     def test_compass_datasets(self):
         from pyACS.acs import BinReader, ACS, FrameLengthError, FrameTypeError, SerialNumberError
         from tqdm import tqdm
@@ -393,37 +392,55 @@ class TestACSFunctions(unittest.TestCase):
                 np.testing.assert_almost_equal(reader.a[sel],
                                                truth_df[reader.a_labels].to_numpy()[sel], decimal=4, err_msg=f)
 
-    @unittest.skip("skipping convert bin to csv")
     def test_convert_bin_to_csv(self):
         from pyACS.acs import ConvertBinToCSV
+        from tqdm import tqdm
 
         # Find data for test
-        test_data_set = [x for x in os.listdir(TEST_COMPASS_DATA) if '_ACS' in x][0]
-        path_to_dataset = os.path.join(TEST_COMPASS_DATA, test_data_set)
-        device_file = [os.path.join(path_to_dataset, f) for f in os.listdir(path_to_dataset) if f.endswith('.dev')][0]
-        bin_file = [os.path.join(path_to_dataset, f) for f in os.listdir(path_to_dataset) if f.endswith('.bin')][0]
-        dat_file = bin_file[:-4] + '.dat'
+        datasets = [x for x in os.listdir(TEST_COMPASS_DATA) if '_ACS' in x]
+        tested_files = 0
+        for d in tqdm(datasets):
+            path_to_dataset = os.path.join(TEST_COMPASS_DATA, d)
+            dev_files = [os.path.join(path_to_dataset, f) for f in os.listdir(path_to_dataset) if f.endswith('.dev')]
+            bin_files = [os.path.join(path_to_dataset, f) for f in os.listdir(path_to_dataset) if f.endswith('.bin')]
+            if not dev_files:
+                print('Skipping dataset %s: no .dev file found.' % d)
+                continue
+            if len(dev_files) > 1:
+                print('Skipping dataset %s: more than one .dev file found.' % d)
+                continue
+            device_file = dev_files[0]
+            if not bin_files:
+                print('Skipping dataset %s: no .bin file(s) found.' % d)
+                continue
+            for bin_file in bin_files:
+                # Check if corresponding .dat file exists
+                dat_file = bin_file[:-4] + '.dat'
+                if not os.path.isfile(dat_file):
+                    print('Skipping %s: no matching .dat file.' % bin_file)
+                    continue
+                for write_aux in [True, False]:
+                    # Run class to test
+                    ConvertBinToCSV(device_file, bin_file, os.path.join(TEST_COMPASS_DATA, 'out.csv'), write_auxiliaries=write_aux)
+                    # Load Result
+                    actual_df = pd.read_csv(os.path.join(TEST_COMPASS_DATA, 'out.csv'), delimiter=',')
+                    actual_df['timestamp'] = actual_df['timestamp'] - actual_df['timestamp'][0]
+                    # Load Truth from Compass
+                    truth_df = read_prep_acs_output(dat_file)
+                    # Check
+                    np.testing.assert_equal(actual_df['timestamp'].to_numpy(),truth_df['Time'].to_numpy())
+                    if write_aux:
+                        np.testing.assert_almost_equal(actual_df[['internal_temperature', 'external_temperature']].to_numpy(),
+                                                       truth_df[['int_temp', 'ext_temp']].to_numpy(), decimal=2)
+                        actual_df_index_end_ac = -2
+                    else:
+                        actual_df_index_end_ac = None
+                    sel = actual_df.iloc[:, 1:actual_df_index_end_ac] < 30
+                    np.testing.assert_almost_equal(actual_df.iloc[:, 1:actual_df_index_end_ac].to_numpy()[sel],
+                                                   truth_df.iloc[:, 1:-6].to_numpy()[sel], decimal=4)
+                    tested_files += 1
 
-        for write_aux in [True, False]:
-            # Run class to test
-            ConvertBinToCSV(device_file, bin_file, os.path.join(TEST_COMPASS_DATA, 'out.csv'), write_auxiliaries=write_aux)
-            # Load Result and Truth
-            actual_df = pd.read_csv(os.path.join(TEST_COMPASS_DATA, 'out.csv'), delimiter=',')
-            actual_df['timestamp'] = actual_df['timestamp'] - actual_df['timestamp'][0]
-            truth_df = read_prep_acs_output(dat_file)
-            # Check
-            np.testing.assert_equal(actual_df['timestamp'].to_numpy(),truth_df['Time'].to_numpy())
-            if write_aux:
-                np.testing.assert_almost_equal(actual_df[['internal_temperature', 'external_temperature']].to_numpy(),
-                                               truth_df[['int_temp', 'ext_temp']].to_numpy(), decimal=2)
-                actual_df_index_end_ac = -2
-            else:
-                actual_df_index_end_ac = None
-            sel = actual_df.iloc[:, 1:actual_df_index_end_ac] < 30
-            np.testing.assert_almost_equal(actual_df.iloc[:, 1:actual_df_index_end_ac].to_numpy()[sel],
-                                           truth_df.iloc[:, 1:-6].to_numpy()[sel], decimal=4)
-
-        # ConvertBinToCSV(device_file, bin_file, os.path.join(TEST_COMPASS_DATA, 'out_with_aux.csv'), write_auxiliaries=False)
+        self.assertGreater(tested_files, 0, 'No dataset had all .dev/.bin/.dat files present; test did not validate anything.')
 
     def test_acs_repr(self):
         from pyACS.acs import ACS

@@ -380,37 +380,29 @@ class ACS:
                  buffer_post_frame: buffer left after the frame
                  buffer_pre_frame: buffer preceding the first frame returned (likely unknown frame header)
         """
-        try:
-            # Look for registration bytes
-            i = buffer.index(self.REGISTRATION_BYTES)
-            # Take care of special case when checksum + pad byte or just checksum = \xff\x00
-            # It's unlikely that the full packet length is equal to \xff\x00 = 65280
-            while buffer.find(self.REGISTRATION_BYTES, i + 2, i + 2 + self.REGISTRATION_BYTES_LENGTH) != -1:
-                i += 2
-            # Get Length of frame (following 2 bytes, already know it from device file)
-            # frame_length = unpack_from('!H', buffer, offset=i + self.REGISTRATION_BYTES_LENGTH)
-            frame_end_index = i + self.frame_length
-            # Get frame
-            frame = buffer[i:frame_end_index]
-            if len(frame) != self.frame_length:
-                return bytearray(), None, buffer, bytearray()
-            # Get Checksum
-            checksum = buffer[frame_end_index:frame_end_index + 2]
-            if len(checksum) != 2:
-                return bytearray(), None, buffer, bytearray()
-            # Check checksum
-            if not self.valid_frame(frame, checksum):
-                # Error in frame, remove registration bytes and attempt again
-                return frame, False, buffer[i+self.REGISTRATION_BYTES_LENGTH:],\
-                       buffer[:i+self.REGISTRATION_BYTES_LENGTH]
-            # Pad byte is not always present... (only +2 for checksum)
-            return frame, True, buffer[frame_end_index + 2:], buffer[:i]
-        except ValueError:
+        # Look for registration bytes
+        i = buffer.find(self.REGISTRATION_BYTES)
+        if i == -1:
             # No registration byte found
             return bytearray(), None, buffer, bytearray()
-        except struct_error:
-            # Buffer is too short to unpack packet length
+        # Take care of special case when checksum + pad byte or just checksum = \xff\x00
+        # It's unlikely that the full packet length is equal to \xff\x00 = 65280
+        while buffer.find(self.REGISTRATION_BYTES, i + 2, i + 2 + self.REGISTRATION_BYTES_LENGTH) != -1:
+            i += 2
+        frame_end_index = i + self.frame_length
+        # Make sure buffer is long enough (incl. 2-byte checksum)
+        if len(buffer) < frame_end_index + 2:
             return bytearray(), None, buffer, bytearray()
+        # Get frame and checksum
+        frame = buffer[i:frame_end_index]
+        checksum = buffer[frame_end_index:frame_end_index + 2]
+        # Check checksum
+        if not self.valid_frame(frame, checksum):
+            # Error in frame, remove registration bytes and attempt again
+            return frame, False, buffer[i+self.REGISTRATION_BYTES_LENGTH:],\
+                    buffer[:i+self.REGISTRATION_BYTES_LENGTH]
+        # Pad byte is not always present... (only +2 for checksum)
+        return frame, True, buffer[frame_end_index + 2:], buffer[:i]
 
     @staticmethod
     def valid_frame(frame, checksum_received):
