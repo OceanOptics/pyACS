@@ -1,18 +1,22 @@
 from __future__ import print_function
 
+import os
+from datetime import datetime, timezone
 import numpy as np
 from math import log
 from collections import namedtuple
 from struct import unpack_from, calcsize
-from struct import error as struct_error
 import csv
 from sys import version_info, exit
 try:
     from scipy import interpolate
 except ImportError:
-    SCIPY_IMPORTED = False
-else:
-    SCIPY_IMPORTED = True
+    interpolate = None
+
+try:
+    import pandas as pd
+except ImportError:
+    pd = None
 
 # Check Python version running script
 if version_info.major != 3:
@@ -75,7 +79,7 @@ class BinReader:
             if unknown_bytes:
                 self.handle_unknown_bytes(unknown_bytes)
 
-    def handle_frame(self, frame, checksum):
+    def handle_frame(self, frame):
         raise NotImplementedError('Implement functionality in handle frame')
 
     def handle_bad_frame(self, bad_frame):
@@ -87,55 +91,80 @@ class BinReader:
 
 class CSVWriter:
 
-    def __init__(self, lambda_c=None, lambda_a=None, write_auxiliaries=False):
-        # Wavelength (in nm)
-        self.lambda_c = lambda_c
-        self.lambda_a = lambda_a
+    def __init__(self, filename=None, lambda_c=None, lambda_a=None, write_auxiliaries=False):
+        self._lambda_c = lambda_c
+        self._lambda_a = lambda_a
+        self._write_auxiliaries = write_auxiliaries
 
-        self.write_auxiliaries = write_auxiliaries
+        self._filename = filename
+        self._f = None
+        self._writer = None
 
-        self.f = None
-        self.writer = None
+    def open(self, filename=None, write_external_timestamp=False):
+        if self._f is not None:
+            self.close()
+        if filename is not None:
+            self._filename = filename
+        if self._filename is None:
+            raise ValueError('CSVWriter: no filename provided to open output file.')
 
-    def open(self, filename):
-        fieldnames = ['timestamp'] + ['c%3.1f' % x for x in self.lambda_c] + ['a%3.1f' % x for x in self.lambda_a]
-        if self.write_auxiliaries:
+        fieldnames = ['external_timestamp'] if write_external_timestamp else []
+        fieldnames.extend(['timestamp'] + ['c%3.1f' % x for x in self._lambda_c] + ['a%3.1f' % x for x in self._lambda_a])
+        if self._write_auxiliaries:
             fieldnames.extend(['internal_temperature', 'external_temperature'])
-        self.f = open(filename, 'w')
-        self.writer = csv.writer(self.f)  # , fieldnames=fieldnames)
-        # self.writer.writeheader()
-        self.writer.writerow(fieldnames)
+        fieldnames.append('flag_outside_calibration_range')
+
+        self._f = open(self._filename, 'w')
+        self._writer = csv.writer(self._f)
+        self._writer.writerow(fieldnames)
 
     def write(self, raw, cal):
-        if self.write_auxiliaries:
-            self.writer.writerow([raw.time_stamp]
-                                 + ["%.6f" % v for v in list(cal.c)]
-                                 + ["%.6f" % v for v in list(cal.a)]
-                                 + ["%.2f" % cal.internal_temperature]
-                                 + ["%.2f" % cal.external_temperature])
-        else:
-            self.writer.writerow([raw.time_stamp]
-                                 + ["%.6f" % v for v in list(cal.c)]
-                                 + ["%.6f" % v for v in list(cal.a)])
+        has_external_timestamp = raw.external_timestamp is not None
+        if self._f is None or self._writer is None:
+            self.open(write_external_timestamp=has_external_timestamp)
+        row = []
+        if has_external_timestamp:
+            if np.isfinite(raw.external_timestamp):
+                row = [datetime.fromtimestamp(raw.external_timestamp, tz=timezone.utc).replace(tzinfo=None).isoformat()]
+            else:
+                row = ['NaT']
+        row.extend([raw.timestamp] + ["%.6f" % v for v in list(cal.c)] + ["%.6f" % v for v in list(cal.a)])
+        if self._write_auxiliaries:
+            row.extend(["%.2f" % cal.internal_temperature] + ["%.2f" % cal.external_temperature])
+        row.append(cal.flag_outside_calibration_range)
+        self._writer.writerow(row)
 
     def close(self):
-        self.f.close()
+        if self._f is not None:
+            self._f.close()
+            self._f = None
+            self._writer = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+
+    def __del__(self):
+        self.close()
 
 
 class ConvertBinToCSV(BinReader):
 
-    def __init__(self, device_filename, bin_filename, csv_filename=None, write_auxiliaries=False):
+    def __init__(self, acs, bin_filename, csv_filename=None, write_auxiliaries=True):
         if not csv_filename:
             csv_filename = bin_filename + '.dat'
         self.calibrate_auxiliaries = write_auxiliaries
         self.counter_good = 0
         self.counter_bad = 0
-        acs = ACS(device_filename)
-        self.csv = CSVWriter(acs.lambda_c, acs.lambda_a, write_auxiliaries)
-        self.csv.open(csv_filename)
-        super(ConvertBinToCSV, self).__init__(acs, bin_filename)
+        self.csv = CSVWriter(csv_filename, acs.lambda_c, acs.lambda_a, write_auxiliaries)
+        try:
+            super(ConvertBinToCSV, self).__init__(acs, bin_filename)
+        finally:
+            self.csv.close()  # ensure file is flushed/closed
 
-    def handle_frame(self, frame):
+    def handle_frame(self, frame, timestamp=None):
         data_raw = self.instrument.unpack_frame(frame)
         try:
             self.instrument.check_data(data_raw)
@@ -153,12 +182,130 @@ class ConvertBinToCSV(BinReader):
         self.csv.close()
 
 
+class BinToDataFrame(BinReader):
+
+    ANC_VAR_NAMES = ['internal_temperature', 'external_temperature', 'flag_outside_calibration_range',
+                     'a_ref_dark', 'a_sig_dark', 'c_ref_dark', 'c_sig_dark']
+
+    def __init__(self, *args, **kwargs):
+        # Parsed data
+        self.timestamp = None
+        self.c = None
+        self.a = None
+        self.int_temp = None
+        self.ext_temp = None
+        self.flag_outside_calibration_range = None
+        self.a_ref_dark = None
+        self.a_sig_dark = None
+        self.c_ref_dark = None
+        self.c_sig_dark = None
+        # Index
+        self.index = 0
+        self.c_labels = None
+        self.a_labels = None
+        # External timestamp
+        self.external_timestamp = None
+
+        super(BinToDataFrame, self).__init__(*args, **kwargs)
+
+    def init_arrays(self, filename):
+        # Estimate byte number (can't be underestimated)
+        n = round(os.path.getsize(filename) / (self.instrument.frame_length))
+        self.timestamp = np.empty(n, dtype=np.int64)
+        self.c = np.empty([n, self.instrument.output_wavelength], dtype=np.float64)
+        self.a = np.empty([n, self.instrument.output_wavelength], dtype=np.float64)
+        self.int_temp = np.empty(n, dtype=np.float64)
+        self.ext_temp = np.empty(n, dtype=np.float64)
+        self.flag_outside_calibration_range = np.empty(n, dtype=np.bool)
+        self.a_ref_dark = np.empty(n, dtype=np.int64)
+        self.a_sig_dark = np.empty(n, dtype=np.int64)
+        self.c_ref_dark = np.empty(n, dtype=np.int64)
+        self.c_sig_dark = np.empty(n, dtype=np.int64)
+        self.external_timestamp = np.empty(n, dtype=np.float64)
+        self.index = 0
+        self.c_labels = ['c%3.1f' % x for x in self.instrument.lambda_c]
+        self.a_labels = ['a%3.1f' % x for x in self.instrument.lambda_a]
+
+    def clean_arrays(self):
+        # Keep only data points within index (other are from initialization and not used)
+        self.timestamp = self.timestamp[:self.index]
+        self.c = self.c[:self.index, :]
+        self.a = self.a[:self.index, :]
+        self.int_temp = self.int_temp[:self.index]
+        self.ext_temp = self.ext_temp[:self.index]
+        self.flag_outside_calibration_range = self.flag_outside_calibration_range[:self.index]
+        self.a_ref_dark = self.a_ref_dark[:self.index]
+        self.a_sig_dark = self.a_sig_dark[:self.index]
+        self.c_ref_dark = self.c_ref_dark[:self.index]
+        self.c_sig_dark = self.c_sig_dark[:self.index]
+        self.external_timestamp = self.external_timestamp[:self.index]
+
+    def pack_data_frame(self):
+        if pd is None:
+            raise ImportError('pandas is required to pack data frame')
+        if len(self.external_timestamp) and not np.all(np.isnan(self.external_timestamp)):
+            return pd.DataFrame(zip(*[
+                pd.to_datetime(self.external_timestamp, unit='s'), #, utc=True),
+                self.timestamp,
+                *[v for v in self.c.transpose()],
+                *[v for v in self.a.transpose()],
+                self.int_temp, self.ext_temp,
+                self.flag_outside_calibration_range,
+                self.a_ref_dark, self.a_sig_dark,
+                self.c_ref_dark, self.c_sig_dark
+            ]), columns=['external_timestamp', 'timestamp', *self.c_labels, *self.a_labels, *self.ANC_VAR_NAMES])
+        return pd.DataFrame(zip(*[self.timestamp,
+                                  *[v for v in self.c.transpose()],
+                                  *[v for v in self.a.transpose()],
+                                  self.int_temp, self.ext_temp,
+                                  self.flag_outside_calibration_range,
+                                  self.a_ref_dark, self.a_sig_dark,
+                                  self.c_ref_dark, self.c_sig_dark]),
+                            columns=['timestamp', *self.c_labels, *self.a_labels, *self.ANC_VAR_NAMES])
+
+    def run(self, filename, *args, **kwargs):
+        self.init_arrays(filename)
+        super(BinToDataFrame, self).run(filename, *args, **kwargs)
+        self.clean_arrays()
+        return self.pack_data_frame()
+
+    def handle_frame(self, frame):
+        data_raw = self.instrument.unpack_frame(frame)
+        try:
+            self.instrument.check_data(data_raw)
+        except (FrameLengthError, FrameTypeError, SerialNumberError):
+            print('Check data failed')
+            return
+        data_cal = self.instrument.calibrate_frame(data_raw, get_external_temperature=True)
+
+        self.timestamp[self.index] = data_raw.timestamp
+        self.a_ref_dark[self.index] = data_raw.a_ref_dark
+        self.a_sig_dark[self.index] = data_raw.a_sig_dark
+        self.c_ref_dark[self.index] = data_raw.c_ref_dark
+        self.c_sig_dark[self.index] = data_raw.c_sig_dark
+        self.c[self.index, :] = data_cal.c
+        self.a[self.index, :] = data_cal.a
+        self.int_temp[self.index] = data_cal.internal_temperature
+        self.ext_temp[self.index] = data_cal.external_temperature
+        self.flag_outside_calibration_range[self.index] = data_cal.flag_outside_calibration_range
+        self.external_timestamp[self.index] = data_raw.external_timestamp
+        self.index += 1
+
+    # def handle_bad_frame(self, bad_frame):
+    #     print('Checksum failed after frame %d' % self.index)
+    #     print(bad_frame)
+
+    # def handle_unknown_bytes(self, bdata):
+    #     print(bdata)
+
+
 RawFrameContainer = namedtuple('RawFrameContainer', ['frame_len', 'frame_type', 'serial_number',
                                                      'a_ref_dark', 'p', 'a_sig_dark',
                                                      't_ext', 't_int',
                                                      'c_ref_dark', 'c_sig_dark',
-                                                     'time_stamp', 'output_wavelength',
-                                                     'c_ref', 'a_ref', 'c_sig', 'a_sig'])
+                                                     'timestamp', 'output_wavelength',
+                                                     'c_ref', 'a_ref', 'c_sig', 'a_sig',
+                                                     'checksum', 'external_timestamp'])
 CalibratedFrameContainer = namedtuple('CalibratedFrameContainer',
                                       ['c', 'a', 'internal_temperature', 'external_temperature',
                                        'flag_outside_calibration_range'])
@@ -174,6 +321,12 @@ class ACS:
     REGISTRATION_BYTES_LENGTH = len(REGISTRATION_BYTES)
     FRAME_HEADER_DESCRIPTOR = '!HBBlHHHHHHHIBB'
     FRAME_HEADER_LENGTH = calcsize(FRAME_HEADER_DESCRIPTOR)
+    CHECKSUM_FORMAT = 'H'
+    CHECKSUM_LENGTH = calcsize('!' + CHECKSUM_FORMAT)
+    PAD_BYTE_FORMAT = 'c'
+    PAD_BYTE_LENGTH = calcsize('!' + PAD_BYTE_FORMAT)
+    EXTERNAL_TIMESTAMP_FORMAT = '' # 'd'
+    EXTERNAL_TIMESTAMP_LENGTH = 0  # calcsize('!' + EXTERNAL_TIMESTAMP_FORMAT)
 
     def __init__(self, device_filename=None):
         # Meta data
@@ -307,7 +460,7 @@ class ACS:
                     self.delta_t_a[iwl, :] = np.array(foo[2].split('\t'))
                     iwl += 1
                 # skip lines "ACS Meter", "tcal[...]", and "maxANoise	maxCNoise[...]"
-            if SCIPY_IMPORTED:
+            if interpolate is not None:
                 # Use scipy for interpolation (build 2D interpolation function, faster than numpy)
                 self.f_delta_t_c = interpolate.interp1d(self.t, self.delta_t_c, axis=1, assume_sorted=True, copy=False,
                                                         bounds_error=False,
@@ -369,7 +522,14 @@ class ACS:
         self.frame_descriptor = self.FRAME_HEADER_DESCRIPTOR
         for i in range(self.output_wavelength):
             self.frame_descriptor += 'HHHH'
+        if self.CHECKSUM_FORMAT:
+            self.frame_descriptor += self.CHECKSUM_FORMAT
+        if self.PAD_BYTE_FORMAT:
+            self.frame_descriptor += self.PAD_BYTE_FORMAT
+        if self.EXTERNAL_TIMESTAMP_FORMAT:
+            self.frame_descriptor += self.EXTERNAL_TIMESTAMP_FORMAT
         self.frame_length = self.REGISTRATION_BYTES_LENGTH + calcsize(self.frame_descriptor)
+        self.checksum_unpacked_index = -1 - 1 * bool(self.PAD_BYTE_LENGTH) - 1 * bool(self.EXTERNAL_TIMESTAMP_LENGTH)
 
     def find_frame(self, buffer):
         """
@@ -380,43 +540,60 @@ class ACS:
                  buffer_post_frame: buffer left after the frame
                  buffer_pre_frame: buffer preceding the first frame returned (likely unknown frame header)
         """
+        frame, is_valid, buffer_post_frame, buffer_pre_frame = bytearray(), None, buffer, bytearray()
         # Look for registration bytes
         i = buffer.find(self.REGISTRATION_BYTES)
         if i == -1:
             # No registration byte found
             return bytearray(), None, buffer, bytearray()
-        # Take care of special case when checksum + pad byte or just checksum = \xff\x00
-        # It's unlikely that the full packet length is equal to \xff\x00 = 65280
+        # Take care of edge case: end of previous corrupted frame (last byte of checksum + pad byte) = \xff\x00
         while buffer.find(self.REGISTRATION_BYTES, i + 2, i + 2 + self.REGISTRATION_BYTES_LENGTH) != -1:
             i += 2
-        frame_end_index = i + self.frame_length
-        # Make sure buffer is long enough (incl. 2-byte checksum)
-        if len(buffer) < frame_end_index + 2:
+        # Assume pad_byte is always present (even if not 0x00), old comments referred to instance with missing pad_byte that would throw off the frame length and datetime.
+        frame_end_index = i + self.frame_length  # Includes checksum, pad_byte, and external timestamp if enabled
+        # Make sure buffer is long enough
+        if len(buffer) < frame_end_index:
             return bytearray(), None, buffer, bytearray()
         # Get frame and checksum
         frame = buffer[i:frame_end_index]
-        checksum = buffer[frame_end_index:frame_end_index + 2]
-        # Check checksum
-        if not self.valid_frame(frame, checksum):
+        # Checksum validity
+        if self.valid_frame(frame) == False:  # Needed to distinguish None (no checksum) and False (invalid checksum)
             # Error in frame, remove registration bytes and attempt again
-            return frame, False, buffer[i+self.REGISTRATION_BYTES_LENGTH:],\
-                    buffer[:i+self.REGISTRATION_BYTES_LENGTH]
-        # Pad byte is not always present... (only +2 for checksum)
-        return frame, True, buffer[frame_end_index + 2:], buffer[:i]
+            return frame, False, buffer[i+self.REGISTRATION_BYTES_LENGTH:], buffer[:i+self.REGISTRATION_BYTES_LENGTH]
+        # Return complete frame (with checksum, pad byte, and external timestamp if enabled)
+        return frame, True, buffer[frame_end_index:], buffer[:i]
 
-    @staticmethod
-    def valid_frame(frame, checksum_received):
+    def valid_frame(cls, frame):
         """
+        If checksum available then use chesksum to validate frame
+        otherwise check length if no other REGISTRATION_BYTES found in frame and timestamp is valid (if enabled)
         Compute frame checksum and compare it to received checksum
             The checksum is the unsigned 16 bit sum of all bytes received in packet,
             including the registration bytes, up to the last byte preceding the checksum bytes.
         :param frame: frame including registration bytes
-        :param checksum_received: two bytes checksum received with the frame
-        :return: True: checksum received and computed match
+        :return: None: no cheksum to check (checksum length = 0)
+                 True: checksum received and computed match
                  False: checksum received and computed do not match
         """
-        # Frame length could be check but is not as checksum should fail if frame length is incorrect
-        return np.uint16(sum(frame) % 2 ** 16) == unpack_from('!H', checksum_received)
+        if cls.CHECKSUM_LENGTH:
+            end_index_offset = cls.CHECKSUM_LENGTH + cls.PAD_BYTE_LENGTH + cls.EXTERNAL_TIMESTAMP_LENGTH
+            checksum_computed = np.uint16(sum(frame[:-end_index_offset]) % 2 ** 16)
+            checksum_received = unpack_from('!H', frame[-end_index_offset:-end_index_offset+cls.CHECKSUM_LENGTH])[0]
+            return checksum_computed == checksum_received
+        if (frame[:cls.REGISTRATION_BYTES_LENGTH] != cls.REGISTRATION_BYTES or
+                frame.find(cls.REGISTRATION_BYTES, cls.REGISTRATION_BYTES_LENGTH) != -1):
+            # Frame does not start with registration bytes or has additional registration bytes in the middle of the frame
+            # Not checking for length as find_frame gives frame of accurate length, and unpack would raise an error
+            return False
+        if cls.EXTERNAL_TIMESTAMP_LENGTH:
+            try:
+                t = unpack_from('!d', frame[-cls.EXTERNAL_TIMESTAMP_LENGTH:])[0]
+                if np.isfinite(t):
+                    datetime.fromtimestamp(t, tz=timezone.utc)
+            except OverflowError:
+                return False
+            return True
+        return None
 
     def unpack_frame(self, frame):
         """
@@ -426,6 +603,11 @@ class ACS:
         :return: data: a frame container tuple with python values from the frame
         """
         d = unpack_from(self.frame_descriptor, frame, offset=self.REGISTRATION_BYTES_LENGTH)
+        n = 4 * self.output_wavelength
+        if d[11] == 20168464:
+            print(d)
+            print(frame)
+            print(frame.hex())
         return RawFrameContainer(frame_len=d[0],  # packet length
                                  frame_type=d[1],  # packet type identifier
                                  # data[] = d[2] # reserved for future use (1)
@@ -437,11 +619,16 @@ class ACS:
                                  t_int=d[8],  # unsigned integer:  Internal temperature voltage counts
                                  c_ref_dark=d[9],  # C reference dark counts
                                  c_sig_dark=d[10],  # C signal dark counts
-                                 time_stamp=d[11],  # unsigned integer: Time stamp (ms)
+                                 timestamp=d[11],  # unsigned integer: Instrument Timestamp (ms)
                                  # data[] = d[12] # reserved for future use
                                  output_wavelength=d[13],  # number of output wavelength
-                                 c_ref=np.array(d[14::4], dtype=np.uint16), a_ref=np.array(d[15::4], dtype=np.uint16),
-                                 c_sig=np.array(d[16::4], dtype=np.uint16), a_sig=np.array(d[17::4], dtype=np.uint16))
+                                 c_ref=np.array(d[14:14+n:4], dtype=np.uint16),
+                                 a_ref=np.array(d[15:15+n:4], dtype=np.uint16),
+                                 c_sig=np.array(d[16:16+n:4], dtype=np.uint16),
+                                 a_sig=np.array(d[17:17+n:4], dtype=np.uint16),
+                                 checksum=d[self.checksum_unpacked_index] if self.CHECKSUM_LENGTH > 0 else None,
+                                 # pad_byte=d[-2] if self.PAD_BYTE_LENGTH > 0 else None,
+                                 external_timestamp=d[-1] if self.EXTERNAL_TIMESTAMP_LENGTH > 0 else None)
 
     def check_data(self, data):
         """
@@ -505,13 +692,24 @@ class ACS:
             c = (self.offset_c - (1 / self.x) * np.log(frame.c_sig / frame.c_ref)) - delta_t_c
             a = (self.offset_a - (1 / self.x) * np.log(frame.a_sig / frame.a_ref)) - delta_t_a
         # Pack output in named tuple
-        if get_external_temperature:
-            return CalibratedFrameContainer(c=c, a=a,
-                                            internal_temperature=internal_temperature_su,
-                                            external_temperature=self.compute_external_temperature(frame.t_ext),
-                                            flag_outside_calibration_range=flag_outside_calibration_range)
-        else:
-            return CalibratedFrameContainer(c=c, a=a,
-                                            internal_temperature=internal_temperature_su,
-                                            external_temperature=None,
-                                            flag_outside_calibration_range=flag_outside_calibration_range)
+        return CalibratedFrameContainer(
+            c=c, a=a,
+            internal_temperature=internal_temperature_su,
+            external_temperature=self.compute_external_temperature(frame.t_ext) if get_external_temperature is not None else None,
+            flag_outside_calibration_range=flag_outside_calibration_range
+        )
+
+
+class ACSCompass(ACS):
+    pass
+
+
+class ACSInlinino(ACS):
+
+    CHECKSUM_FORMAT = '' #'H'
+    CHECKSUM_LENGTH = 0  # calcsize('!' + CHECKSUM_FORMAT)
+    PAD_BYTE_FORMAT = '' # 'c'
+    PAD_BYTE_LENGTH = 0  # calcsize('!' + PAD_BYTE_FORMAT)
+    EXTERNAL_TIMESTAMP_FORMAT = 'd'
+    EXTERNAL_TIMESTAMP_LENGTH = calcsize('!' + EXTERNAL_TIMESTAMP_FORMAT)
+

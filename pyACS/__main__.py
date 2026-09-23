@@ -1,6 +1,6 @@
 import argparse
 from pyACS import __version__
-from pyACS.acs import ConvertBinToCSV
+from pyACS.acs import ConvertBinToCSV, ACSInlinino, ACS
 
 # Argument Parser
 parser = argparse.ArgumentParser(prog="python -m pyACS")
@@ -16,12 +16,18 @@ parser.add_argument("destination", type=str, default=None, nargs='?',
                     help="Destination file of decoded and calibrated data.")
 parser.add_argument("-aux", "--auxiliaries", action="store_true",
                     help="Output auxiliary data (internal and external temperatures).")
+parser.add_argument("--inlinino", action="store_true",
+                    help="bin_file follows inlinino format.")
 args = parser.parse_args()
 
 # Decode and Calibrate binary file
 if args.verbose:
     print('Unpacking and calibrating ' + args.bin_file + ' ... ', end='', flush=True)
-cbc = ConvertBinToCSV(args.device_file, args.bin_file, args.destination, args.auxiliaries)
+if args.inlinino:
+    acs_parser = ACSInlinino(args.device_file)
+else:
+    acs_parser = ACS(args.device_file)
+cbc = ConvertBinToCSV(acs_parser, args.bin_file, args.destination, args.auxiliaries)
 if args.verbose:
     print('DONE')
     print('\tFrames extracted: ' + str(cbc.counter_good))

@@ -35,10 +35,10 @@ optional arguments:
   -aux, --auxiliaries  Output auxiliary data (internal and external temperatures).
 
 ## Embed in other Software
-The class `ACS` provides key methods to handle the binary ACS data
+The classes `ACS` and `ACSInlinino` provides key methods to handle the binary ACS data from **Compass** and **Inlinino** respectively:
 * `read_device_file`: Parse device file to be able to unpack and calibrate binary frame
 * `find_frame`: Find registered ACS frames in bytearray
 * `unpack_frame`: Unpack/Decode a binary frame into named tuple `FrameContainer`
 * `calibrate_frame`: Convert a frame engineering units (counts) into scientific units (1/m for a and c)
 
-The classes `BinReader` and `ConvertBinToCSV` are an illustration of the usage of the ACS class to parse binary files recorded with Compass software (.bin).
+The classes `BinReader` and `ConvertBinToCSV` are an illustration of the usage of these classes to parse binary files (.bin).
