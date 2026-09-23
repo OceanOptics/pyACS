@@ -35,7 +35,7 @@ optional arguments:
   -aux, --auxiliaries  Output auxiliary data (internal and external temperatures).
 
 ## Embed in other Software
-The classes `ACSCompass` and `ACSInlinino` provides key methods to handle the binary ACS data from **Compass** and **Inlinino** respectively:
+The classes `ACS` and `ACSInlinino` provides key methods to handle the binary ACS data from **Compass** and **Inlinino** respectively:
 * `read_device_file`: Parse device file to be able to unpack and calibrate binary frame
 * `find_frame`: Find registered ACS frames in bytearray
 * `unpack_frame`: Unpack/Decode a binary frame into named tuple `FrameContainer`

@@ -1,9 +1,16 @@
+import os
 import unittest
 from struct import unpack
+from datetime import datetime, timezone
+
 import numpy as np
 import pandas as pd
-import os
 from scipy import interpolate
+try:
+    from tqdm import tqdm
+except ImportError:
+    tqdm = lambda x: x  # If tqdm is not available, use a dummy function
+
 
 TEST_FRAME = b'\x53\xd0\x03\x01\x53\x00\x00\x02\x4e\x1e\x01\xba\x21\x29\x35\xff\
 \x00\xff\x00\x02\xd0\x05\x01\x53\x00\x00\x02\x4e\x1a\x01\xba\x02\
@@ -58,15 +65,15 @@ TEST_COMPASS_DATA = 'test_data/'
 
 class TestACSFunctions(unittest.TestCase):
     def test_compute_external_temperature(self):
-        from pyACS.acs import ACSCompass
-        acs = ACSCompass()
+        from pyACS.acs import ACS
+        acs = ACS()
         counts = unpack('!H', b'\x7a\xe4')[0]
         su = acs.compute_external_temperature(counts)
         self.assertAlmostEqual(su, 22.14, 2)
 
     def test_compute_internal_temperature(self):
-        from pyACS.acs import ACSCompass
-        acs = ACSCompass()
+        from pyACS.acs import ACS
+        acs = ACS()
         # AC-S (from ACS User Manual)
         counts = unpack('!H', b'\xb9\xd8')[0] # 16-bit unsigned integer == H (2 bytes unsigned short)
         su = acs.compute_internal_temperature(counts)
@@ -145,9 +152,11 @@ class TestACSFunctions(unittest.TestCase):
                                      t_ext=np.nan,  # External temperature voltage counts
                                      c_ref_dark=np.nan,  # C reference dark counts
                                      c_sig_dark=np.nan,  # C signal dark counts
-                                     time_stamp=np.nan)  # unsigned integer: Time stamp (ms)
+                                     timestamp=np.nan,  # unsigned integer: Instrument Timestamp (ms)
+                                     checksum=np.nan,  # unsigned integer: Checksum (2 bytes)
+                                     external_timestamp=np.nan)  # double: Logger timestamp (seconds)
         # Define ACS
-        acs = pa.ACSCompass()
+        acs = pa.ACS()
         acs.serial_number = '0x5300012A'
         acs.output_wavelength = 3
         acs.t = np.array([27.75, 28.2625])
@@ -181,33 +190,33 @@ class TestACSFunctions(unittest.TestCase):
             self.assertAlmostEqual(float(cal.a[i]), -0.0409, 2)
 
     def test_acs_find_frame(self):
-        from pyACS.acs import ACSCompass
+        from pyACS.acs import ACS
 
-        acs = ACSCompass()
+        acs = ACS()
         acs.output_wavelength = 86
         acs.set_frame_descriptor()
 
         frame, checksum, buffer, skipped = acs.find_frame(TEST_FRAME)
-        self.assertEqual(frame, TEST_FRAME[15:735])
+        self.assertEqual(frame, TEST_FRAME[15:738])  # Updated definitin=
         self.assertEqual(checksum, True)
-        self.assertEqual(buffer, TEST_FRAME[737:])
+        self.assertEqual(buffer, TEST_FRAME[738:])
         self.assertEqual(skipped, TEST_FRAME[:15])
 
     def test_acs_valid_frame(self):
-        from pyACS.acs import ACSCompass
+        from pyACS.acs import ACS
 
-        acs = ACSCompass()
+        acs = ACS()
         acs.output_wavelength = 86
         acs.set_frame_descriptor()
 
         frame, checksum, buffer, skipped = acs.find_frame(TEST_FRAME)
-        passed = acs.valid_frame(frame, TEST_FRAME[735:737])
+        passed = acs.valid_frame(frame)
         self.assertEqual(passed, True)
 
     def test_acs_unpack_frame(self):
-        from pyACS.acs import ACSCompass
+        from pyACS.acs import ACS
 
-        acs = ACSCompass()
+        acs = ACS()
         acs.output_wavelength = 86
         acs.set_frame_descriptor()
 
@@ -217,7 +226,7 @@ class TestACSFunctions(unittest.TestCase):
         self.assertEqual(data.frame_len, 720)
         self.assertEqual(data.frame_type, 5)
         self.assertEqual(data.serial_number, '0x53000002')
-        self.assertEqual(data.time_stamp, 465666)
+        self.assertEqual(data.timestamp, 465666)
         self.assertEqual(data.output_wavelength, 86)
         self.assertEqual(data.a_ref_dark, unpack('!H', b'\x4e\x1a')[0])
         self.assertEqual(data.p, unpack('!H', b'\x01\xba')[0])
@@ -238,9 +247,9 @@ class TestACSFunctions(unittest.TestCase):
         self.assertEqual(data.a_sig[-1], unpack('!H', b'\x2c\x1c')[0])
 
     def test_acs_check_data(self):
-        from pyACS.acs import ACSCompass
+        from pyACS.acs import ACS
 
-        acs = ACSCompass()
+        acs = ACS()
         acs.serial_number = '0x53000002'
         acs.output_wavelength = 86
         acs.set_frame_descriptor()
@@ -250,203 +259,140 @@ class TestACSFunctions(unittest.TestCase):
         passed = acs.check_data(data)
         self.assertEqual(passed, True)
 
-    @unittest.skip("skipping Compass Dataset test")
-    def test_compass_datasets(self):
-        from pyACS.acs import BinReader, ACSCompass, FrameLengthError, FrameTypeError, SerialNumberError
-        from tqdm import tqdm
+    def _iter_dataset_parsers(self):
+        """Yield (dataset_name, path_to_dataset, logging_software, parser, bin_files) for each valid dataset dir."""
+        from pyACS.acs import ACSCompass, ACSInlinino
 
-        class BinToDataFrame(BinReader):
-
-            ANC_VAR_NAMES = ['int_temp', 'ext_temp', 'Aref_dark', 'Asig_dark', 'Cref_dark', 'Csig_dark']
-
-            def __init__(self, *args, **kwargs):
-                # Parsed data
-                self.timestamp = None
-                self.c = None
-                self.a = None
-                self.int_temp = None
-                self.ext_temp = None
-                self.a_ref_dark = None
-                self.a_sig_dark = None
-                self.c_ref_dark = None
-                self.c_sig_dark = None
-                # Index
-                self.index = 0
-                self.c_labels = None
-                self.a_labels = None
-
-                super(BinToDataFrame, self).__init__(*args, **kwargs)
-
-            def init_arrays(self, filename):
-                # Estimate byte number (2 bytes of checksum and 1 byte of padding are not included in frame length)
-                n = round(os.path.getsize(filename) / (self.instrument.frame_length + 3))
-                self.timestamp = np.empty(n, dtype=np.int64)
-                self.c = np.empty([n, self.instrument.output_wavelength], dtype=np.float64)
-                self.a = np.empty([n, self.instrument.output_wavelength], dtype=np.float64)
-                self.int_temp = np.empty(n, dtype=np.float64)
-                self.ext_temp = np.empty(n, dtype=np.float64)
-                self.a_ref_dark = np.empty(n, dtype=np.int64)
-                self.a_sig_dark = np.empty(n, dtype=np.int64)
-                self.c_ref_dark = np.empty(n, dtype=np.int64)
-                self.c_sig_dark = np.empty(n, dtype=np.int64)
-                self.index = 0
-                self.c_labels = ['C%3.1f' % x for x in self.instrument.lambda_c]
-                self.a_labels = ['A%3.1f' % x for x in self.instrument.lambda_a]
-
-            def clean_arrays(self):
-                # Keep only data points within index (other are from initialization and not used)
-                self.timestamp = self.timestamp[:self.index]
-                self.c = self.c[:self.index, :]
-                self.a = self.a[:self.index, :]
-                self.int_temp = self.int_temp[:self.index]
-                self.ext_temp = self.ext_temp[:self.index]
-                self.a_ref_dark = self.a_ref_dark[:self.index]
-                self.a_sig_dark = self.a_sig_dark[:self.index]
-                self.c_ref_dark = self.c_ref_dark[:self.index]
-                self.c_sig_dark = self.c_sig_dark[:self.index]
-
-            def pack_data_frame(self):
-                return pd.DataFrame(zip(*[self.timestamp,
-                                          *[v for v in self.c.transpose()],
-                                          *[v for v in self.a.transpose()],
-                                          self.int_temp, self.ext_temp,
-                                          self.a_ref_dark, self.a_sig_dark,
-                                          self.c_ref_dark, self.c_sig_dark]),
-                                    columns=['Time', *self.c_labels, *self.a_labels, *self.ANC_VAR_NAMES])
-
-            def run(self, filename, *args, **kwargs):
-                self.init_arrays(filename)
-                super(BinToDataFrame, self).run(filename, *args, **kwargs)
-                self.clean_arrays()
-                return self.pack_data_frame()
-
-            def handle_frame(self, frame):
-                data_raw = self.instrument.unpack_frame(frame)
-                try:
-                    self.instrument.check_data(data_raw)
-                except (FrameLengthError, FrameTypeError, SerialNumberError):
-                    print('Check data failed')
-                    return
-                data_cal = self.instrument.calibrate_frame(data_raw, get_external_temperature=True)
-
-                self.timestamp[self.index] = data_raw.time_stamp
-                self.a_ref_dark[self.index] = data_raw.a_ref_dark
-                self.a_sig_dark[self.index] = data_raw.a_sig_dark
-                self.c_ref_dark[self.index] = data_raw.c_ref_dark
-                self.c_sig_dark[self.index] = data_raw.c_sig_dark
-                self.c[self.index, :] = data_cal.c
-                self.a[self.index, :] = data_cal.a
-                self.int_temp[self.index] = data_cal.internal_temperature
-                self.ext_temp[self.index] = data_cal.external_temperature
-                self.index += 1
-
-            # def handle_bad_frame(self, bad_frame):
-            #     print('Checksum failed after frame %d' % self.index)
-            #     print(bad_frame)
-
-            # def handle_unknown_bytes(self, bdata):
-            #     print(bdata)
-
-        datasets = [x for x in os.listdir(TEST_COMPASS_DATA) if '_ACS' in x]
-        # datasets = ['EXPORTS1_ACS298']
+        datasets = [x for x in os.listdir(TEST_COMPASS_DATA) if os.path.isdir(os.path.join(TEST_COMPASS_DATA, x)) and '_ACS' in x]
         for d in tqdm(datasets):
             path_to_dataset = os.path.join(TEST_COMPASS_DATA, d)
-            device_filename = [os.path.join(path_to_dataset, f) for f in os.listdir(path_to_dataset) if f.endswith('.dev')][0]
-            reader = BinToDataFrame(ACSCompass(device_filename))
-            bin_files = [os.path.join(path_to_dataset, f) for f in os.listdir(path_to_dataset) if f.endswith('.bin')]
-            # bin_files = bin_files[:2]  # Only test with 2 first files of each subset (comment line for full test)
-            # bin_files = ['test_data/EXPORTS1_ACS298/acs298_20180815201617.bin']
-            for f in bin_files:
-                if not os.path.isfile(f[:-4] + '.dat'):
-                    print('Unable to check, no dat file. %s' % f)
-                    continue
-                actual_df = reader.run(f)
-                # Adjust DataFrame from reader to match prep acs
-                actual_df['Time'] = actual_df['Time'] - actual_df['Time'][0]
-                # Read Truth
-                truth_df = read_prep_acs_output(f[:-4] + '.dat')
-                # Check length
-                # if len(truth_df) != len(actual_df):
-                #     missing = set(truth_df['Time']) - set(actual_df['Time'])
-                #     missing_index = truth_df.index[truth_df.Time.isin(missing)]
-                #     if missing:
-                #         print('Missing frames: ', missing_index)
-                #     extra = set(actual_df['Time']) - set(truth_df['Time'])
-                #     extra_index = actual_df.index[actual_df.Time.isin(extra)]
-                #     if extra:
-                #         print('Extra frames: ', extra_index)
-                #     # Remove missing or extra
-                #     truth_df.drop(missing_index, inplace=True)
-                #     truth_df.reset_index(drop=True, inplace=True)
-                #     actual_df.drop(extra_index, inplace=True)
-                #     actual_df.reset_index(drop=True, inplace=True)
-                # Compare actual with expected
-                np.testing.assert_equal(actual_df[['Time'] + reader.ANC_VAR_NAMES[2:]].to_numpy(),
-                                        truth_df[['Time'] + reader.ANC_VAR_NAMES[2:]].to_numpy(), err_msg=f)
-                np.testing.assert_almost_equal(actual_df[reader.ANC_VAR_NAMES[:2]].to_numpy(),
-                                               truth_df[reader.ANC_VAR_NAMES[:2]].to_numpy(), decimal=2, err_msg=f)
-                # Ignore high values as compass and python diverge
-                sel = reader.c < 29
-                np.testing.assert_almost_equal(reader.c[sel],
-                                               truth_df[reader.c_labels].to_numpy()[sel], decimal=4, err_msg=f)
-                sel = reader.a < 29
-                np.testing.assert_almost_equal(reader.a[sel],
-                                               truth_df[reader.a_labels].to_numpy()[sel], decimal=4, err_msg=f)
-
-    @unittest.skip("skipping convert bin to csv")
-    def test_convert_bin_to_csv(self):
-        from pyACS.acs import ConvertBinToCSV, ACSCompass
-        from tqdm import tqdm
-
-        # Find data for test
-        datasets = [x for x in os.listdir(TEST_COMPASS_DATA) if '_ACS' in x]
-        tested_files = 0
-        for d in tqdm(datasets):
-            path_to_dataset = os.path.join(TEST_COMPASS_DATA, d)
-            dev_files = [os.path.join(path_to_dataset, f) for f in os.listdir(path_to_dataset) if f.endswith('.dev')]
-            bin_files = [os.path.join(path_to_dataset, f) for f in os.listdir(path_to_dataset) if f.endswith('.bin')]
-            if not dev_files:
+            device_files = [os.path.join(path_to_dataset, f) for f in os.listdir(path_to_dataset) if f.endswith('.dev')]
+            if not device_files:
                 print('Skipping dataset %s: no .dev file found.' % d)
                 continue
-            if len(dev_files) > 1:
+            if len(device_files) > 1:
                 print('Skipping dataset %s: more than one .dev file found.' % d)
                 continue
-            device_file = dev_files[0]
-            acs_parser = ACSCompass(device_file)
+            device_file = device_files[0]
+            logging_software = 'Inlinino' if 'Inlinino' in d else 'Compass'
+            if logging_software == 'Inlinino':
+                parser = ACSInlinino(device_file)
+            elif logging_software == 'Compass':
+                parser = ACSCompass(device_file)
+            else:
+                print('Skipping dataset %s: unknown logging software.' % d)
+                continue
+            bin_files = [os.path.join(path_to_dataset, f) for f in os.listdir(path_to_dataset) if f.endswith('.bin')]
             if not bin_files:
                 print('Skipping dataset %s: no .bin file(s) found.' % d)
                 continue
-            for bin_file in bin_files:
-                # Check if corresponding .dat file exists
-                dat_file = bin_file[:-4] + '.dat'
-                if not os.path.isfile(dat_file):
-                    print('Skipping %s: no matching .dat file.' % bin_file)
-                    continue
-                for write_aux in [True, False]:
-                    # Run class to test
-                    ConvertBinToCSV(acs_parser, bin_file, os.path.join(TEST_COMPASS_DATA, 'out.csv'), write_auxiliaries=write_aux)
-                    # Load Result
-                    actual_df = pd.read_csv(os.path.join(TEST_COMPASS_DATA, 'out.csv'), delimiter=',')
-                    actual_df['timestamp'] = actual_df['timestamp'] - actual_df['timestamp'][0]
-                    # Load Truth
-                    truth_df = read_prep_acs_output(dat_file)
-                    # Check
-                    np.testing.assert_equal(actual_df['timestamp'].to_numpy(),truth_df['Time'].to_numpy())
-                    if write_aux:
-                        np.testing.assert_almost_equal(actual_df[['internal_temperature', 'external_temperature']].to_numpy(),
-                                                       truth_df[['int_temp', 'ext_temp']].to_numpy(), decimal=2)
-                        actual_df_index_end_ac = -2
-                    else:
-                        actual_df_index_end_ac = None
-                    sel = actual_df.iloc[:, 1:actual_df_index_end_ac] < 30
-                    np.testing.assert_almost_equal(actual_df.iloc[:, 1:actual_df_index_end_ac].to_numpy()[sel],
-                                                   truth_df.iloc[:, 1:-6].to_numpy()[sel], decimal=4)
-                    tested_files += 1
+            yield d, path_to_dataset, logging_software, parser, bin_files
 
-        self.assertGreater(tested_files, 0, 'No dataset had all .dev/.bin/.dat files present; test did not validate anything.')
+    def _load_truth_dataframe(self, logging_software, bin_file):
+        """Locate and load the truth dataframe matching bin_file. Returns (None, None) if not found/supported."""
+        if logging_software == 'Inlinino':
+            csv_file = bin_file[:-4] + '.csv'
+            if not os.path.isfile(csv_file):
+                print('Skipping %s: no matching .csv file.' % bin_file)
+                return None, None
+            return read_inlinino_csv_output(csv_file), csv_file
+        elif logging_software == 'Compass':
+            dat_file = bin_file[:-4] + '.dat'
+            if not os.path.isfile(dat_file):
+                print('Skipping %s: no matching .dat file.' % bin_file)
+                return None, None
+            return read_prep_acs_output(dat_file), dat_file
+        else:
+            print('Unable to check, unknown logging software. %s' % bin_file)
+            return None, None
+
+    def _check_datasets(self, produce_actual_df):
+        tested_files = 0
+        for d, path_to_dataset, logging_software, parser, bin_files in self._iter_dataset_parsers():
+            for bin_file in bin_files:
+                actual_df, with_aux = produce_actual_df(logging_software, parser, bin_file)
+                if len(actual_df) == 0:
+                    print('No valid frames found for %s' % bin_file)
+                    continue
+                truth_df, truth_file = self._load_truth_dataframe(logging_software, bin_file)
+                if truth_df is None:
+                    continue
+                # Assert loaded dataframe
+                if logging_software == 'Inlinino':
+                    self.assert_valid_inlinino_dataframe(actual_df, truth_df, with_aux=with_aux)
+                elif logging_software == 'Compass':
+                    self.assert_valid_compass_dataframe(actual_df, truth_df, with_aux=with_aux)
+                else:
+                    self.fail('Unknown logging software: %s' % logging_software)
+                tested_files += 1
+
+        self.assertGreater(tested_files, 0,
+                           'No dataset had all .dev/.bin/.dat files present; test did not validate anything.')
+        return tested_files
+
+    # @unittest.skip("skipping Compass Dataset test")
+    def test_reading_datasets(self):
+        from pyACS.acs import BinToDataFrame
+
+        def produce_actual_df(logging_software, parser, bin_file):
+            actual_df = BinToDataFrame(parser).run(bin_file)
+            with_aux = True  # aux is present in actual_df
+            return actual_df, with_aux
+
+        self._check_datasets(produce_actual_df)
+
+    # @unittest.skip("skipping convert bin to csv")
+    def test_convert_bin_to_csv(self):
+        from pyACS.acs import ConvertBinToCSV
+
+        def produce_actual_df(logging_software, parser, bin_file, write_aux=True):
+            output_file = os.path.join(TEST_COMPASS_DATA, 'out.csv')  # os.path.basename(bin_file) + '_out.csv'
+            if os.path.isfile(output_file):
+                os.remove(output_file)
+            ConvertBinToCSV(parser, bin_file, output_file, write_auxiliaries=write_aux)
+            actual_df = pd.read_csv(output_file, delimiter=',') if os.path.isfile(output_file) else pd.DataFrame()
+            return actual_df, write_aux
+
+        self._check_datasets(produce_actual_df)
+
+    def assert_valid_compass_dataframe(self, actual, truth, with_aux=True):
+        # Check Time
+        actual_time = actual['timestamp'] - actual['timestamp'][0]
+        np.testing.assert_equal(actual_time.to_numpy(), truth['Time'].to_numpy())
+        # Check Auxiliaries
+        if with_aux:
+            np.testing.assert_almost_equal(actual[['internal_temperature', 'external_temperature']].to_numpy(),
+                                           truth[['int_temp', 'ext_temp']].to_numpy(), decimal=2)
+        # Check c and a values
+        actual_ca_idx = actual.columns.str.match(r'^[ac]\d')
+        sel = actual.loc[:, actual_ca_idx] < 30
+        np.testing.assert_almost_equal(actual.loc[:, actual_ca_idx].to_numpy()[sel],
+                                       truth.iloc[:, 1:-6].to_numpy()[sel], decimal=4)
+
+    def assert_valid_inlinino_dataframe(self, actual, truth, with_aux=True):
+        # Check Timestamps
+        np.testing.assert_equal(actual['timestamp'].to_numpy(), truth['acs_timestamp'].to_numpy())
+        # Inlinino timestamps bug can create time offsets: 2026-04-01T15:13:18.999803 rounds to 15:13:18.000 instead of 15:13:19.000
+        #   it could propagate to a minute, an hour, a day...
+        delta = np.abs(actual['external_timestamp'].to_numpy().astype("datetime64[ms]")
+                       - truth['time'].to_numpy().astype("datetime64[ms]"))
+        # np.testing.assert_array_less(delta, np.timedelta64(1, 'ms'))  # Ideal testing
+        np.testing.assert_array_less(delta, np.timedelta64(1, 'm'))  # due to bug in inlinino
+        self.assertLessEqual(np.count_nonzero(delta > np.timedelta64(1, 'ms')),
+                             0.05 * len(delta))  # due to bug in inlinino, need to tolerate some offsets.
+        # Check Auxiliaries
+        if with_aux:
+            np.testing.assert_almost_equal(actual['internal_temperature'].to_numpy(), truth['T_int'].to_numpy(), decimal=2)
+            np.testing.assert_almost_equal(actual['external_temperature'].to_numpy(), truth['T_ext'].to_numpy(), decimal=2)
+        np.testing.assert_equal(actual['flag_outside_calibration_range'].to_numpy(),
+                                truth['flag_outside_calibration_range'].to_numpy())
+        # Check c and a values
+        actual_ca_idx = actual.columns.str.match(r'^[ac]\d')
+        np.testing.assert_almost_equal(actual.loc[:, actual_ca_idx].to_numpy(),
+                                       truth.iloc[:, 5:].to_numpy(), decimal=4)
 
     def test_acs_repr(self):
-        from pyACS.acs import ACSCompass
+        from pyACS.acs import ACS
 
         # Find data for test
         test_data_set = [x for x in os.listdir(TEST_COMPASS_DATA) if '_ACS' in x][0]
@@ -454,7 +400,7 @@ class TestACSFunctions(unittest.TestCase):
         device_file = [os.path.join(path_to_dataset, f) for f in os.listdir(path_to_dataset) if f.endswith('.dev')][0]
 
         # Test function works
-        foo = repr(ACSCompass(device_file))
+        foo = repr(ACS(device_file))
 
 
 def read_prep_acs_output(filename):
@@ -462,6 +408,28 @@ def read_prep_acs_output(filename):
     df.drop(['diagnostic', 'pr_acs'], axis=1, inplace=True)
     df.rename(columns=lambda x: x.strip(), inplace=True)
     return df
+
+
+def read_inlinino_csv_output(filename):
+    # Read the first 3 rows to get metadata
+    meta = pd.read_csv(filename, nrows=2, header=None)
+    c_wavelengths = np.fromstring(meta.iloc[1, 2].split("lambda=")[1], sep=" ")
+    a_wavelengths = np.fromstring(meta.iloc[1, 3].split("lambda=")[1], sep=" ")
+    # Read data, skipping units and wavelength rows
+    df = pd.read_csv(filename, skiprows=[1])
+    # Parse time
+    df["time"] = pd.to_datetime(df["time"])
+    # Expand c and a arrays into individual columns
+    c = pd.DataFrame(
+        df.pop("c").apply(lambda x: np.fromstring(x.strip("[]"), sep=" ")).tolist(),
+        columns=[f"c{w:.1f}" for w in c_wavelengths],
+    )
+    a = pd.DataFrame(
+        df.pop("a").apply(lambda x: np.fromstring(x.strip("[]"), sep=" ")).tolist(),
+        columns=[f"a{w:.1f}" for w in a_wavelengths],
+    )
+    return pd.concat([df, c, a], axis=1)
+
 
 if __name__ == '__main__':
     unittest.main()

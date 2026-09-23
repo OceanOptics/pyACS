@@ -1,6 +1,6 @@
 import argparse
 from pyACS import __version__
-from pyACS.acs import ConvertBinToCSV, ACSInlinino, ACSCompass
+from pyACS.acs import ConvertBinToCSV, ACSInlinino, ACS
 
 # Argument Parser
 parser = argparse.ArgumentParser(prog="python -m pyACS")
@@ -26,7 +26,7 @@ if args.verbose:
 if args.inlinino:
     acs_parser = ACSInlinino(args.device_file)
 else:
-    acs_parser = ACSCompass(args.device_file)
+    acs_parser = ACS(args.device_file)
 cbc = ConvertBinToCSV(acs_parser, args.bin_file, args.destination, args.auxiliaries)
 if args.verbose:
     print('DONE')
