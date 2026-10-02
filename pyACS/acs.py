@@ -604,10 +604,6 @@ class ACS:
         """
         d = unpack_from(self.frame_descriptor, frame, offset=self.REGISTRATION_BYTES_LENGTH)
         n = 4 * self.output_wavelength
-        if d[11] == 20168464:
-            print(d)
-            print(frame)
-            print(frame.hex())
         return RawFrameContainer(frame_len=d[0],  # packet length
                                  frame_type=d[1],  # packet type identifier
                                  # data[] = d[2] # reserved for future use (1)
